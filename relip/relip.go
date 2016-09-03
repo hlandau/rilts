@@ -23,6 +23,7 @@ var (
 	licencePathFlag    = kingpin.Flag("licence-path", "path to directory containing licence files").ExistingDir()
 	allowedLicenceFlag = kingpin.Flag("licence", "identifier for an allowed licence (may be specified multiple times)").Short('L').Strings()
 	branchFlag         = kingpin.Flag("branch", "refspec to check").Short('B').Default("HEAD").String()
+	whitelistFileFlag  = kingpin.Flag("whitelist", "path to file containing list of commit IDs to exempt").Short('W').ExistingFile()
 )
 
 var reSHA256 = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
@@ -62,6 +63,27 @@ func main() {
 		}
 	}
 
+	whitelistedCommits := map[string]struct{}{}
+	if *whitelistFileFlag != "" {
+		f, err := os.Open(*whitelistFileFlag)
+		log.Fatale(err, "open whitelist file")
+		defer f.Close()
+		rdr := bufio.NewReader(f)
+		for {
+			L, err := rdr.ReadString('\n')
+			if err == io.EOF {
+				break
+			}
+			log.Fatale(err, "read whitelist file")
+			L = strings.TrimSpace(L)
+			if L == "" || strings.HasPrefix(L, "#") {
+				continue
+			}
+			L = strings.ToLower(L)
+			whitelistedCommits[L] = struct{}{}
+		}
+	}
+
 	var err error
 	*repoArg, err = filepath.Abs(*repoArg)
 	log.Fatale(err, "cannot absolutize repository path")
@@ -84,7 +106,7 @@ func main() {
 	var errors []error
 
 	// Check commits.
-	err = checkCommit(c, allowedLicences, &errors)
+	err = checkCommit(c, allowedLicences, whitelistedCommits, &errors)
 	log.Fatale(err)
 
 	if len(errors) > 0 {
@@ -97,11 +119,11 @@ func main() {
 	}
 }
 
-func checkCommit(c *git.Commit, allowedLicences map[string]struct{}, errors *[]error) error {
+func checkCommit(c *git.Commit, allowedLicences, whitelistedCommits map[string]struct{}, errors *[]error) error {
 	retroPersons := map[string]struct{}{}
 
 	for {
-		err := checkCommitLocal(c, retroPersons, allowedLicences, errors)
+		err := checkCommitLocal(c, retroPersons, allowedLicences, whitelistedCommits, errors)
 		if err != nil {
 			return err
 		}
@@ -116,7 +138,7 @@ func checkCommit(c *git.Commit, allowedLicences map[string]struct{}, errors *[]e
 	return nil
 }
 
-func checkCommitLocal(c *git.Commit, retroPersons, allowedLicences map[string]struct{}, errors *[]error) error {
+func checkCommitLocal(c *git.Commit, retroPersons, allowedLicences, whitelistedCommits map[string]struct{}, errors *[]error) error {
 	msg := c.Message()
 	stanzas, err := extractStanzas(msg)
 	if err != nil {
@@ -208,6 +230,10 @@ L:
 		}
 
 		retroPersons[r.Person] = struct{}{}
+	}
+
+	if _, ok := whitelistedCommits[c.Id().String()]; ok {
+		hasAllowedHash = true
 	}
 
 	if !hasAllowedHash {
